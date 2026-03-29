@@ -4,6 +4,7 @@ import { useRef, useEffect, useCallback, useState } from "react";
 import { PixiRenderer } from "@/engine/PixiRenderer";
 import { PlaybackEngine } from "@/engine/PlaybackEngine";
 import { useEditorStore } from "@/store/editorStore";
+import { DEFAULT_TRANSFORM } from "@/engine/types";
 
 export default function CanvasViewport() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -11,6 +12,16 @@ export default function CanvasViewport() {
   const rendererRef = useRef<PixiRenderer | null>(null);
   const engineRef = useRef<PlaybackEngine | null>(null);
   const [backendType, setBackendType] = useState<string>("initializing...");
+
+  // Canvas interaction state
+  const [isDragging, setIsDragging] = useState(false);
+  const dragRef = useRef<{
+    clipId: string;
+    startMouseX: number;
+    startMouseY: number;
+    startClipX: number;
+    startClipY: number;
+  } | null>(null);
 
   const {
     project,
@@ -20,6 +31,13 @@ export default function CanvasViewport() {
     isPlaying,
     setCurrentTime,
     setIsPlaying,
+    selectedClipId,
+    selectClip,
+    updateClip,
+    addClip,
+    addTrack,
+    activeTool,
+    setActiveTool,
   } = useEditorStore();
 
   // Initialize PixiJS renderer
@@ -32,20 +50,15 @@ export default function CanvasViewport() {
     renderer.init(canvasRef.current).then(() => {
       setBackendType(renderer.rendererType);
 
-      // Fit canvas to container
-      if (containerRef.current) {
+      // Fit canvas to container via CSS only – keep renderer at project resolution
+      if (containerRef.current && canvasRef.current) {
         const rect = containerRef.current.getBoundingClientRect();
         const scale = Math.min(
           rect.width / project.width,
           rect.height / project.height
         );
-        const w = project.width * scale;
-        const h = project.height * scale;
-        renderer.resize(w, h);
-        if (canvasRef.current) {
-          canvasRef.current.style.width = `${w}px`;
-          canvasRef.current.style.height = `${h}px`;
-        }
+        canvasRef.current.style.width = `${project.width * scale}px`;
+        canvasRef.current.style.height = `${project.height * scale}px`;
       }
     });
 
@@ -101,18 +114,15 @@ export default function CanvasViewport() {
 
     const observer = new ResizeObserver((entries) => {
       const entry = entries[0];
-      if (!entry || !rendererRef.current || !canvasRef.current) return;
+      if (!entry || !canvasRef.current) return;
 
       const { width, height } = entry.contentRect;
       const scale = Math.min(
         width / project.width,
         height / project.height
       );
-      const w = project.width * scale;
-      const h = project.height * scale;
-      rendererRef.current.resize(w, h);
-      canvasRef.current.style.width = `${w}px`;
-      canvasRef.current.style.height = `${h}px`;
+      canvasRef.current.style.width = `${project.width * scale}px`;
+      canvasRef.current.style.height = `${project.height * scale}px`;
     });
 
     observer.observe(containerRef.current);
@@ -139,6 +149,140 @@ export default function CanvasViewport() {
     setCurrentTime(Math.min(project.duration, currentTime + 1));
     engineRef.current?.seek(Math.min(project.duration, currentTime + 1));
   }, [currentTime, project.duration, setCurrentTime]);
+
+  // Convert CSS pixel coords on the <canvas> element to project coords
+  const cssToProject = useCallback(
+    (clientX: number, clientY: number): { x: number; y: number } | null => {
+      const canvas = canvasRef.current;
+      if (!canvas) return null;
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = project.width / rect.width;
+      const scaleY = project.height / rect.height;
+      return {
+        x: (clientX - rect.left) * scaleX,
+        y: (clientY - rect.top) * scaleY,
+      };
+    },
+    [project.width, project.height]
+  );
+
+  // Canvas pointer down: select / start drag / text tool
+  const handleCanvasPointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      const renderer = rendererRef.current;
+      if (!renderer) return;
+
+      const pt = cssToProject(e.clientX, e.clientY);
+      if (!pt) return;
+
+      if (activeTool === "text") {
+        // Add a text clip at click position
+        const store = useEditorStore.getState();
+
+        // Find or create a text track
+        let textTrack = store.tracks.find((t) => t.type === "text");
+        if (!textTrack) {
+          textTrack = addTrack("text", "Text");
+        }
+        const trackId = textTrack.id;
+
+        // Place after existing clips on this track (or at currentTime)
+        const trackClips = store.clips.filter((c) => c.trackId === trackId);
+        const lastEnd = trackClips.reduce(
+          (max, c) => Math.max(max, c.startTime + c.duration),
+          0
+        );
+        const startTime = Math.max(currentTime, lastEnd);
+
+        const clip = addClip({
+          type: "text",
+          name: "Text clip",
+          trackId,
+          startTime,
+          duration: 3,
+          sourceOffset: 0,
+          sourceDuration: 3,
+          transform: {
+            ...DEFAULT_TRANSFORM,
+            x: pt.x - project.width / 2,
+            y: pt.y - project.height / 2,
+          },
+          text: "New Text",
+          fontSize: 64,
+          fontFamily: "Arial",
+          color: "#ffffff",
+        });
+        selectClip(clip.id);
+        setActiveTool("select");
+        return;
+      }
+
+      // Select tool: hit-test
+      const hitId = renderer.hitTest(pt.x, pt.y);
+      selectClip(hitId);
+
+      if (hitId) {
+        const clip = clips.find((c) => c.id === hitId);
+        if (clip) {
+          dragRef.current = {
+            clipId: hitId,
+            startMouseX: pt.x,
+            startMouseY: pt.y,
+            startClipX: clip.transform.x,
+            startClipY: clip.transform.y,
+          };
+          setIsDragging(true);
+          (e.target as HTMLElement).setPointerCapture(e.pointerId);
+        }
+      }
+    },
+    [
+      activeTool,
+      clips,
+      currentTime,
+      project.width,
+      project.height,
+      cssToProject,
+      selectClip,
+      addClip,
+      addTrack,
+      setActiveTool,
+    ]
+  );
+
+  const handleCanvasPointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      if (!isDragging || !dragRef.current) return;
+
+      const pt = cssToProject(e.clientX, e.clientY);
+      if (!pt) return;
+
+      const dx = pt.x - dragRef.current.startMouseX;
+      const dy = pt.y - dragRef.current.startMouseY;
+
+      const clip = clips.find((c) => c.id === dragRef.current!.clipId);
+      if (!clip) return;
+
+      updateClip(dragRef.current.clipId, {
+        transform: {
+          ...clip.transform,
+          x: dragRef.current.startClipX + dx,
+          y: dragRef.current.startClipY + dy,
+        },
+      });
+    },
+    [isDragging, cssToProject, clips, updateClip]
+  );
+
+  const handleCanvasPointerUp = useCallback(() => {
+    dragRef.current = null;
+    setIsDragging(false);
+  }, []);
+
+  // Sync bounding box with selection
+  useEffect(() => {
+    rendererRef.current?.showBoundingBox(selectedClipId);
+  }, [selectedClipId, clips, currentTime]);
 
   const formatTime = (t: number) => {
     const mins = Math.floor(t / 60);
@@ -167,7 +311,18 @@ export default function CanvasViewport() {
         <canvas
           ref={canvasRef}
           className="rounded shadow-2xl shadow-black/50"
-          style={{ imageRendering: "auto" }}
+          style={{
+            imageRendering: "auto",
+            cursor:
+              activeTool === "text"
+                ? "crosshair"
+                : isDragging
+                  ? "grabbing"
+                  : "default",
+          }}
+          onPointerDown={handleCanvasPointerDown}
+          onPointerMove={handleCanvasPointerMove}
+          onPointerUp={handleCanvasPointerUp}
         />
       </div>
 

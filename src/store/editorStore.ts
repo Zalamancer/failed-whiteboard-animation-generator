@@ -51,6 +51,10 @@ interface EditorState {
   snapEnabled: boolean;
   toggleSnap: () => void;
 
+  // Panel visibility
+  leftPanelCollapsed: boolean;
+  toggleLeftPanel: () => void;
+
   // Helpers
   getClipsForTrack: (trackId: string) => Clip[];
   getVisibleClips: (time: number) => Clip[];
@@ -134,6 +138,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   // Snapping
   snapEnabled: true,
   toggleSnap: () => set((s) => ({ snapEnabled: !s.snapEnabled })),
+
+  // Panel visibility
+  leftPanelCollapsed: false,
+  toggleLeftPanel: () => set((s) => ({ leftPanelCollapsed: !s.leftPanelCollapsed })),
 
   // Helpers
   getClipsForTrack: (trackId) => get().clips.filter((c) => c.trackId === trackId),

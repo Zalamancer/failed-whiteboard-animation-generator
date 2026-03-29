@@ -22,6 +22,8 @@ export class PixiRenderer {
   private imageTextures: Map<string, Texture> = new Map();
   private initialized = false;
   private settings: ProjectSettings;
+  private boundingBox: Graphics | null = null;
+  private selectedClipId: string | null = null;
 
   constructor(settings: ProjectSettings) {
     this.app = new Application();
@@ -101,6 +103,9 @@ export class PixiRenderer {
         this.updateClipContainer(container, clip, currentTime, trackOrder);
       }
     }
+
+    // Redraw bounding box after updating positions
+    this.drawBoundingBox();
   }
 
   private createClipContainer(clip: Clip): Container {
@@ -132,8 +137,6 @@ export class PixiRenderer {
       fontFamily: clip.fontFamily || "Arial",
       fontSize: clip.fontSize || 64,
       fill: clip.color || "#ffffff",
-      wordWrap: true,
-      wordWrapWidth: this.settings.width * 0.8,
       align: "center",
     });
 
@@ -285,6 +288,89 @@ export class PixiRenderer {
         }
       }
     }
+  }
+
+  /**
+   * Get the project settings (canvas dimensions).
+   */
+  get projectSettings(): ProjectSettings {
+    return this.settings;
+  }
+
+  /**
+   * Hit-test a point in canvas-pixel coordinates (after accounting for CSS scaling).
+   * Returns the clip ID of the topmost hit clip, or null.
+   */
+  hitTest(canvasX: number, canvasY: number): string | null {
+    if (!this.initialized) return null;
+
+    // Iterate in reverse z-order (topmost first)
+    const entries = Array.from(this.clipContainers.entries());
+    entries.sort((a, b) => {
+      return (b[1].zIndex ?? 0) - (a[1].zIndex ?? 0);
+    });
+
+    for (const [clipId, container] of entries) {
+      const bounds = container.getBounds();
+      if (
+        canvasX >= bounds.x &&
+        canvasX <= bounds.x + bounds.width &&
+        canvasY >= bounds.y &&
+        canvasY <= bounds.y + bounds.height
+      ) {
+        return clipId;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Show a bounding box around the selected clip.
+   */
+  showBoundingBox(clipId: string | null): void {
+    this.selectedClipId = clipId;
+    this.drawBoundingBox();
+  }
+
+  private drawBoundingBox(): void {
+    if (!this.initialized) return;
+
+    // Remove old bounding box
+    if (this.boundingBox) {
+      this.stage.removeChild(this.boundingBox);
+      this.boundingBox.destroy();
+      this.boundingBox = null;
+    }
+
+    if (!this.selectedClipId) return;
+
+    const container = this.clipContainers.get(this.selectedClipId);
+    if (!container) return;
+
+    const bounds = container.getBounds();
+    const pad = 4;
+
+    const g = new Graphics();
+    // Dashed-style bounding box
+    g.rect(bounds.x - pad, bounds.y - pad, bounds.width + pad * 2, bounds.height + pad * 2);
+    g.stroke({ color: "#00b4ff", width: 2 });
+
+    // Corner handles
+    const handleSize = 8;
+    const corners = [
+      [bounds.x - pad, bounds.y - pad],
+      [bounds.x + bounds.width + pad, bounds.y - pad],
+      [bounds.x - pad, bounds.y + bounds.height + pad],
+      [bounds.x + bounds.width + pad, bounds.y + bounds.height + pad],
+    ];
+    for (const [cx, cy] of corners) {
+      g.rect(cx - handleSize / 2, cy - handleSize / 2, handleSize, handleSize);
+      g.fill("#00b4ff");
+    }
+
+    g.zIndex = 9999;
+    this.stage.addChild(g);
+    this.boundingBox = g;
   }
 
   destroy(): void {
